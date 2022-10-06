@@ -22,5 +22,10 @@
 			]
 		}
 	},
-	"remoteUser": "vscode"
+	"remoteUser": "vscode",
+	"features": {
+		"github-cli": "latest",
+		"homebrew": "latest",
+		"powershell": "latest"
+	}
 }
