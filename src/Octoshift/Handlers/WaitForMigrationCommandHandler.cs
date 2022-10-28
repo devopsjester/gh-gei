@@ -2,25 +2,24 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using OctoshiftCLI.Commands;
-using OctoshiftCLI.Contracts;
 
 [assembly: InternalsVisibleTo("OctoshiftCLI.Tests")]
 
 namespace OctoshiftCLI.Handlers;
 
-public class WaitForMigrationCommandHandler
+public class WaitForMigrationCommandHandler : ICommandHandler<WaitForMigrationCommandArgs>
 {
     internal int WaitIntervalInSeconds = 10;
 
     private readonly OctoLogger _log;
-    private readonly ITargetGithubApiFactory _githubApiFactory;
+    private readonly GithubApi _githubApi;
     private const string REPO_MIGRATION_ID_PREFIX = "RM_";
     private const string ORG_MIGRATION_ID_PREFIX = "OM_";
 
-    public WaitForMigrationCommandHandler(OctoLogger log, ITargetGithubApiFactory githubApiFactory)
+    public WaitForMigrationCommandHandler(OctoLogger log, GithubApi githubApi)
     {
         _log = log;
-        _githubApiFactory = githubApiFactory;
+        _githubApi = githubApi;
     }
 
     public async Task Handle(WaitForMigrationCommandArgs args)
@@ -31,7 +30,6 @@ public class WaitForMigrationCommandHandler
         }
 
         _log.Verbose = args.Verbose;
-
         _log.RegisterSecret(args.GithubPat);
 
         if (args.MigrationId is null)
@@ -44,21 +42,19 @@ public class WaitForMigrationCommandHandler
             throw new OctoshiftCliException($"Invalid migration id: {args.MigrationId}");
         }
 
-        var githubApi = _githubApiFactory.Create(targetPersonalAccessToken: args.GithubPat);
-
         if (args.MigrationId.StartsWith(REPO_MIGRATION_ID_PREFIX))
         {
-            await WaitForRepositoryMigration(args.MigrationId, args.GithubPat, githubApi);
+            await WaitForRepositoryMigration(args.MigrationId, args.GithubPat, _githubApi);
         }
         else
         {
-            await WaitForOrgMigration(args.MigrationId, args.GithubPat, githubApi);
+            await WaitForOrgMigration(args.MigrationId, args.GithubPat, _githubApi);
         }
     }
 
     private async Task WaitForOrgMigration(string migrationId, string githubPat, GithubApi githubApi)
     {
-        var (state, sourceOrgUrl, targetOrgName, failureReason) = await githubApi.GetOrganizationMigration(migrationId);
+        var (state, sourceOrgUrl, targetOrgName, failureReason, remainingRepositoriesCount, totalRepositoriesCount) = await githubApi.GetOrganizationMigration(migrationId);
 
         _log.LogInformation($"Waiting for {sourceOrgUrl} -> {targetOrgName} migration (ID: {migrationId}) to finish...");
 
@@ -80,11 +76,19 @@ public class WaitForMigrationCommandHandler
                 throw new OctoshiftCliException($"Migration {migrationId} failed for {sourceOrgUrl} -> {targetOrgName}. Failure reason: {failureReason}");
             }
 
-            _log.LogInformation($"Migration {migrationId} is {state}");
+            if (OrganizationMigrationStatus.IsRepoMigration(state))
+            {
+                var completedRepositoriesCount = (int)totalRepositoriesCount - (int)remainingRepositoriesCount;
+                _log.LogInformation($"Migration {migrationId} is {state} - {completedRepositoriesCount}/{totalRepositoriesCount} repositories completed");
+            }
+            else
+            {
+                _log.LogInformation($"Migration {migrationId} is {state}");
+            }
             _log.LogInformation($"Waiting {WaitIntervalInSeconds} seconds...");
             await Task.Delay(WaitIntervalInSeconds * 1000);
 
-            (state, sourceOrgUrl, targetOrgName, failureReason) = await githubApi.GetOrganizationMigration(migrationId);
+            (state, sourceOrgUrl, targetOrgName, failureReason, remainingRepositoriesCount, totalRepositoriesCount) = await githubApi.GetOrganizationMigration(migrationId);
         }
     }
 

@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using FluentAssertions;
 using Moq;
-using OctoshiftCLI.Contracts;
 using OctoshiftCLI.GithubEnterpriseImporter;
 using OctoshiftCLI.GithubEnterpriseImporter.Commands;
 using OctoshiftCLI.GithubEnterpriseImporter.Handlers;
@@ -14,7 +13,6 @@ namespace OctoshiftCLI.Tests.GithubEnterpriseImporter.Commands
     public class MigrateOrgCommandHandlerTests
     {
         private readonly Mock<GithubApi> _mockGithubApi = TestHelpers.CreateMock<GithubApi>();
-        private readonly Mock<ITargetGithubApiFactory> _mockTargetGithubApiFactory = new();
         private readonly Mock<OctoLogger> _mockOctoLogger = TestHelpers.CreateMock<OctoLogger>();
         private readonly Mock<EnvironmentVariableProvider> _mockEnvironmentVariableProvider = TestHelpers.CreateMock<EnvironmentVariableProvider>();
 
@@ -28,7 +26,7 @@ namespace OctoshiftCLI.Tests.GithubEnterpriseImporter.Commands
         {
             _handler = new MigrateOrgCommandHandler(
                 _mockOctoLogger.Object,
-                _mockTargetGithubApiFactory.Object,
+                _mockGithubApi.Object,
                 _mockEnvironmentVariableProvider.Object);
         }
 
@@ -48,12 +46,10 @@ namespace OctoshiftCLI.Tests.GithubEnterpriseImporter.Commands
             _mockGithubApi.Setup(x => x.GetEnterpriseId(TARGET_ENTERPRISE).Result).Returns(githubEntpriseId);
             _mockGithubApi.Setup(x => x.StartOrganizationMigration(githubOrgUrl, TARGET_ORG, githubEntpriseId, sourceGithubPat).Result).Returns(migrationId);
             _mockGithubApi.Setup(x => x.GetOrganizationMigration(migrationId).Result)
-                .Returns((State: migrationState, SourceOrgUrl: githubOrgUrl, TargetOrgName: TARGET_ORG, FailureReason: null));
+                .Returns((State: migrationState, SourceOrgUrl: githubOrgUrl, TargetOrgName: TARGET_ORG, FailureReason: null, RemainingRepositoriesCount: 0, TotalRepositoriesCount: 9000));
 
             _mockEnvironmentVariableProvider.Setup(m => m.SourceGithubPersonalAccessToken()).Returns(sourceGithubPat);
             _mockEnvironmentVariableProvider.Setup(m => m.TargetGithubPersonalAccessToken()).Returns(targetGithubPat);
-
-            _mockTargetGithubApiFactory.Setup(m => m.Create(It.IsAny<string>(), It.IsAny<string>())).Returns(_mockGithubApi.Object);
 
             var actualLogOutput = new List<string>();
             _mockOctoLogger.Setup(m => m.LogInformation(It.IsAny<string>())).Callback<string>(s => actualLogOutput.Add(s));
@@ -80,7 +76,7 @@ namespace OctoshiftCLI.Tests.GithubEnterpriseImporter.Commands
                 GithubTargetPat = targetGithubPat,
                 Wait = true,
             };
-            await _handler.Invoke(args);
+            await _handler.Handle(args);
 
             // Assert
             _mockGithubApi.Verify(m => m.GetEnterpriseId(TARGET_ENTERPRISE));
@@ -109,12 +105,10 @@ namespace OctoshiftCLI.Tests.GithubEnterpriseImporter.Commands
             _mockGithubApi.Setup(x => x.GetOrganizationId(TARGET_ORG).Result).Returns(githubOrgId);
             _mockGithubApi.Setup(x => x.GetEnterpriseId(TARGET_ENTERPRISE).Result).Returns(githubEntpriseId);
             _mockGithubApi.Setup(x => x.StartOrganizationMigration(githubOrgUrl, TARGET_ORG, githubEntpriseId, targetGithubPat).Result).Returns(migrationId);
-            _mockGithubApi.Setup(x => x.GetOrganizationMigration(migrationId).Result).Returns((State: migrationState, SourceOrgUrl: githubOrgUrl, TargetOrgName: TARGET_ORG, FailureReason: null));
+            _mockGithubApi.Setup(x => x.GetOrganizationMigration(migrationId).Result).Returns((State: migrationState, SourceOrgUrl: githubOrgUrl, TargetOrgName: TARGET_ORG, FailureReason: null, RemainingRepositoriesCount: 0, TotalRepositoriesCount: 9000));
 
             _mockEnvironmentVariableProvider.Setup(m => m.SourceGithubPersonalAccessToken()).Returns(sourceGithubPat);
             _mockEnvironmentVariableProvider.Setup(m => m.TargetGithubPersonalAccessToken()).Returns(targetGithubPat);
-
-            _mockTargetGithubApiFactory.Setup(m => m.Create(It.IsAny<string>(), It.IsAny<string>())).Returns(_mockGithubApi.Object);
 
             var actualLogOutput = new List<string>();
             _mockOctoLogger.Setup(m => m.LogInformation(It.IsAny<string>())).Callback<string>(s => actualLogOutput.Add(s));
@@ -140,7 +134,7 @@ namespace OctoshiftCLI.Tests.GithubEnterpriseImporter.Commands
                 GithubTargetPat = targetGithubPat,
                 Wait = true,
             };
-            await _handler.Invoke(args);
+            await _handler.Handle(args);
 
             // Assert
             _mockGithubApi.Verify(m => m.GetEnterpriseId(TARGET_ENTERPRISE));
@@ -169,12 +163,10 @@ namespace OctoshiftCLI.Tests.GithubEnterpriseImporter.Commands
             _mockGithubApi.Setup(x => x.GetOrganizationId(TARGET_ORG).Result).Returns(githubOrgId);
             _mockGithubApi.Setup(x => x.GetEnterpriseId(TARGET_ENTERPRISE).Result).Returns(githubEntpriseId);
             _mockGithubApi.Setup(x => x.StartOrganizationMigration(githubOrgUrl, TARGET_ORG, githubEntpriseId, sourceGithubPat).Result).Returns(migrationId);
-            _mockGithubApi.Setup(x => x.GetOrganizationMigration(migrationId).Result).Returns((State: migrationState, SourceOrgUrl: githubOrgUrl, TargetOrgName: TARGET_ORG, FailureReason: null));
+            _mockGithubApi.Setup(x => x.GetOrganizationMigration(migrationId).Result).Returns((State: migrationState, SourceOrgUrl: githubOrgUrl, TargetOrgName: TARGET_ORG, FailureReason: null, RemainingRepositoriesCount: 0, TotalRepositoriesCount: 9000));
 
             _mockEnvironmentVariableProvider.Setup(m => m.SourceGithubPersonalAccessToken()).Returns(sourceGithubPat);
             _mockEnvironmentVariableProvider.Setup(m => m.TargetGithubPersonalAccessToken()).Returns(targetGithubPat);
-
-            _mockTargetGithubApiFactory.Setup(m => m.Create(It.IsAny<string>(), It.IsAny<string>())).Returns(_mockGithubApi.Object);
 
             var actualLogOutput = new List<string>();
             _mockOctoLogger.Setup(m => m.LogInformation(It.IsAny<string>())).Callback<string>(s => actualLogOutput.Add(s));
@@ -197,7 +189,7 @@ namespace OctoshiftCLI.Tests.GithubEnterpriseImporter.Commands
                 GithubTargetEnterprise = TARGET_ENTERPRISE,
                 Wait = true,
             };
-            await _handler.Invoke(args);
+            await _handler.Handle(args);
 
             // Assert
             _mockGithubApi.Verify(m => m.GetEnterpriseId(TARGET_ENTERPRISE));

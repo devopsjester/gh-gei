@@ -18,11 +18,14 @@ public class GenerateScriptCommand : CommandBase<GenerateScriptCommandArgs, Gene
         AddOption(GithubOrg);
         AddOption(BbsUsername);
         AddOption(BbsPassword);
+        AddOption(BbsSharedHome);
         AddOption(SshUser);
         AddOption(SshPrivateKey);
         AddOption(SshPort);
         AddOption(Output);
+        AddOption(Kerberos);
         AddOption(Verbose);
+        AddOption(AwsBucketName);
     }
 
     public Option<string> BbsServerUrl { get; } = new(
@@ -43,15 +46,17 @@ public class GenerateScriptCommand : CommandBase<GenerateScriptCommandArgs, Gene
                       $"{Environment.NewLine}" +
                       "Note: The password will not get included in the generated script and it has to be set as an env variable before running the script.");
 
+    public Option<string> BbsSharedHome { get; } = new(
+        name: "--bbs-shared-home",
+        description: "Bitbucket server's shared home directory. If not provided \"/var/atlassian/application-data/bitbucket/shared\" will be used.");
+
     public Option<string> SshUser { get; } = new(
         name: "--ssh-user",
-        description: "The SSH user to be used for downloading the export archive off of the Bitbucket server.")
-    { IsRequired = true };
+        description: "The SSH user to be used for downloading the export archive off of the Bitbucket server.");
 
     public Option<string> SshPrivateKey { get; } = new(
         name: "--ssh-private-key",
-        description: "The full path of the private key file to be used for downloading the export archive off of the Bitbucket Server using SSH/SFTP.")
-    { IsRequired = true };
+        description: "The full path of the private key file to be used for downloading the export archive off of the Bitbucket Server using SSH/SFTP.");
 
     public Option<int> SshPort { get; } = new(
         name: "--ssh-port",
@@ -62,9 +67,18 @@ public class GenerateScriptCommand : CommandBase<GenerateScriptCommandArgs, Gene
         name: "--output",
         getDefaultValue: () => new FileInfo("./migrate.ps1"));
 
+    public Option<bool> Kerberos { get; } = new(
+        name: "--kerberos",
+        description: "Use Kerberos authentication for Bitbucket Server.")
+    { IsHidden = true };
+
+    public Option<string> AwsBucketName { get; } = new(
+        name: "--aws-bucket-name",
+        description: "If using AWS, the name of the S3 bucket to upload the BBS archive to.");
+
     public Option<bool> Verbose { get; } = new("--verbose");
 
-    public override GenerateScriptCommandHandler BuildHandler(GenerateScriptCommandArgs args, ServiceProvider sp)
+    public override GenerateScriptCommandHandler BuildHandler(GenerateScriptCommandArgs args, IServiceProvider sp)
     {
         if (args is null)
         {
@@ -82,7 +96,7 @@ public class GenerateScriptCommand : CommandBase<GenerateScriptCommandArgs, Gene
         var environmentVariableProvider = sp.GetRequiredService<EnvironmentVariableProvider>();
 
         var bbsApiFactory = sp.GetRequiredService<BbsApiFactory>();
-        var bbsApi = bbsApiFactory.Create(args.BbsServerUrl, args.BbsUsername, args.BbsPassword);
+        var bbsApi = args.Kerberos ? bbsApiFactory.CreateKerberos(args.BbsServerUrl) : bbsApiFactory.Create(args.BbsServerUrl, args.BbsUsername, args.BbsPassword);
 
         return new GenerateScriptCommandHandler(log, versionProvider, fileSystemProvider, bbsApi, environmentVariableProvider);
     }
@@ -94,9 +108,12 @@ public class GenerateScriptCommandArgs
     public string GithubOrg { get; set; }
     public string BbsUsername { get; set; }
     public string BbsPassword { get; set; }
+    public string BbsSharedHome { get; set; }
     public string SshUser { get; set; }
     public string SshPrivateKey { get; set; }
     public string SshPort { get; set; }
     public FileInfo Output { get; set; }
+    public bool Kerberos { get; set; }
     public bool Verbose { get; set; }
+    public string AwsBucketName { get; set; }
 }

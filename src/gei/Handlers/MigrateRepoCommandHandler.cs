@@ -2,35 +2,39 @@
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using OctoshiftCLI.Contracts;
 using OctoshiftCLI.Extensions;
 using OctoshiftCLI.GithubEnterpriseImporter.Commands;
+using OctoshiftCLI.Handlers;
 
 namespace OctoshiftCLI.GithubEnterpriseImporter.Handlers;
 
-public class MigrateRepoCommandHandler
+public class MigrateRepoCommandHandler : ICommandHandler<MigrateRepoCommandArgs>
 {
     private readonly OctoLogger _log;
-    private readonly ISourceGithubApiFactory _sourceGithubApiFactory;
-    private readonly ITargetGithubApiFactory _targetGithubApiFactory;
-    private readonly IAzureApiFactory _azureApiFactory;
+    private readonly GithubApi _sourceGithubApi;
+    private readonly GithubApi _targetGithubApi;
+    private readonly AzureApi _azureApi;
+    private readonly AwsApi _awsApi;
     private readonly EnvironmentVariableProvider _environmentVariableProvider;
+    private readonly HttpDownloadService _httpDownloadService;
     private const int ARCHIVE_GENERATION_TIMEOUT_IN_HOURS = 10;
     private const int CHECK_STATUS_DELAY_IN_MILLISECONDS = 10000; // 10 seconds
     private const string GIT_ARCHIVE_FILE_NAME = "git_archive.tar.gz";
     private const string METADATA_ARCHIVE_FILE_NAME = "metadata_archive.tar.gz";
     private const string DEFAULT_GITHUB_BASE_URL = "https://github.com";
 
-    public MigrateRepoCommandHandler(OctoLogger log, ISourceGithubApiFactory sourceGithubApiFactory, ITargetGithubApiFactory targetGithubApiFactory, EnvironmentVariableProvider environmentVariableProvider, IAzureApiFactory azureApiFactory)
+    public MigrateRepoCommandHandler(OctoLogger log, GithubApi sourceGithubApi, GithubApi targetGithubApi, EnvironmentVariableProvider environmentVariableProvider, AzureApi azureApi, AwsApi awsApi, HttpDownloadService httpDownloadService)
     {
         _log = log;
-        _sourceGithubApiFactory = sourceGithubApiFactory;
-        _targetGithubApiFactory = targetGithubApiFactory;
+        _sourceGithubApi = sourceGithubApi;
+        _targetGithubApi = targetGithubApi;
         _environmentVariableProvider = environmentVariableProvider;
-        _azureApiFactory = azureApiFactory;
+        _azureApi = azureApi;
+        _awsApi = awsApi;
+        _httpDownloadService = httpDownloadService;
     }
 
-    public async Task Invoke(MigrateRepoCommandArgs args)
+    public async Task Handle(MigrateRepoCommandArgs args)
     {
         if (args is null)
         {
@@ -38,6 +42,10 @@ public class MigrateRepoCommandHandler
         }
 
         _log.Verbose = args.Verbose;
+        _log.RegisterSecret(args.AdoPat);
+        _log.RegisterSecret(args.GithubSourcePat);
+        _log.RegisterSecret(args.GithubTargetPat);
+        _log.RegisterSecret(args.AzureStorageConnectionString);
 
         LogOptions(args);
         ValidateOptions(args);
@@ -45,34 +53,29 @@ public class MigrateRepoCommandHandler
         if (args.GhesApiUrl.HasValue())
         {
             (args.GitArchiveUrl, args.MetadataArchiveUrl) = await GenerateAndUploadArchive(
-              args.GhesApiUrl,
               args.GithubSourceOrg,
               args.SourceRepo,
-              args.AzureStorageConnectionString,
-              args.GithubSourcePat,
+              args.AwsBucketName,
               args.SkipReleases,
-              args.LockSourceRepo,
-              args.NoSslVerify
+              args.LockSourceRepo
             );
 
             _log.LogInformation("Archives uploaded to Azure Blob Storage, now starting migration...");
         }
 
-        var githubApi = _targetGithubApiFactory.Create(args.TargetApiUrl, args.GithubTargetPat);
-
-        var githubOrgId = await githubApi.GetOrganizationId(args.GithubTargetOrg);
+        var githubOrgId = await _targetGithubApi.GetOrganizationId(args.GithubTargetOrg);
         var sourceRepoUrl = GetSourceRepoUrl(args);
         var sourceToken = GetSourceToken(args);
         var targetToken = args.GithubTargetPat ?? _environmentVariableProvider.TargetGithubPersonalAccessToken();
         var migrationSourceId = args.GithubSourceOrg.HasValue()
-            ? await githubApi.CreateGhecMigrationSource(githubOrgId)
-            : await githubApi.CreateAdoMigrationSource(githubOrgId, args.AdoServerUrl);
+            ? await _targetGithubApi.CreateGhecMigrationSource(githubOrgId)
+            : await _targetGithubApi.CreateAdoMigrationSource(githubOrgId, args.AdoServerUrl);
 
         string migrationId;
 
         try
         {
-            migrationId = await githubApi.StartMigration(
+            migrationId = await _targetGithubApi.StartMigration(
                 migrationSourceId,
                 sourceRepoUrl,
                 githubOrgId,
@@ -101,13 +104,13 @@ public class MigrateRepoCommandHandler
             return;
         }
 
-        var (migrationState, _, failureReason) = await githubApi.GetMigration(migrationId);
+        var (migrationState, _, failureReason) = await _targetGithubApi.GetMigration(migrationId);
 
         while (RepositoryMigrationStatus.IsPending(migrationState))
         {
             _log.LogInformation($"Migration in progress (ID: {migrationId}). State: {migrationState}. Waiting 10 seconds...");
             await Task.Delay(10000);
-            (migrationState, _, failureReason) = await githubApi.GetMigration(migrationId);
+            (migrationState, _, failureReason) = await _targetGithubApi.GetMigration(migrationId);
         }
 
         if (RepositoryMigrationStatus.IsFailed(migrationState))
@@ -148,54 +151,54 @@ public class MigrateRepoCommandHandler
     }
 
     private async Task<(string GitArchiveUrl, string MetadataArchiveUrl)> GenerateAndUploadArchive(
-      string ghesApiUrl,
       string githubSourceOrg,
       string sourceRepo,
-      string azureStorageConnectionString,
-      string githubSourcePat,
+      string awsBucketName,
       bool skipReleases,
-      bool lockSourceRepo,
-      bool noSslVerify = false)
+      bool lockSourceRepo)
     {
-        if (string.IsNullOrWhiteSpace(azureStorageConnectionString))
-        {
-            _log.LogInformation("--azure-storage-connection-string not set, using environment variable AZURE_STORAGE_CONNECTION_STRING");
-            azureStorageConnectionString = _environmentVariableProvider.AzureStorageConnectionString();
-
-            if (string.IsNullOrWhiteSpace(azureStorageConnectionString))
-            {
-                throw new OctoshiftCliException("Please set either --azure-storage-connection-string or AZURE_STORAGE_CONNECTION_STRING");
-            }
-        }
-
-        var ghesApi = noSslVerify ? _sourceGithubApiFactory.CreateClientNoSsl(ghesApiUrl, githubSourcePat) : _sourceGithubApiFactory.Create(ghesApiUrl, githubSourcePat);
-        var azureApi = noSslVerify ? _azureApiFactory.CreateClientNoSsl(azureStorageConnectionString) : _azureApiFactory.Create(azureStorageConnectionString);
-
-        var gitDataArchiveId = await ghesApi.StartGitArchiveGeneration(githubSourceOrg, sourceRepo);
+        var gitDataArchiveId = await _sourceGithubApi.StartGitArchiveGeneration(githubSourceOrg, sourceRepo);
         _log.LogInformation($"Archive generation of git data started with id: {gitDataArchiveId}");
-        var metadataArchiveId = await ghesApi.StartMetadataArchiveGeneration(githubSourceOrg, sourceRepo, skipReleases, lockSourceRepo);
+        var metadataArchiveId = await _sourceGithubApi.StartMetadataArchiveGeneration(githubSourceOrg, sourceRepo, skipReleases, lockSourceRepo);
         _log.LogInformation($"Archive generation of metadata started with id: {metadataArchiveId}");
 
         var timeNow = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}";
         var gitArchiveFileName = $"{timeNow}-{gitDataArchiveId}-{GIT_ARCHIVE_FILE_NAME}";
         var metadataArchiveFileName = $"{timeNow}-{metadataArchiveId}-{METADATA_ARCHIVE_FILE_NAME}";
 
-        var gitArchiveUrl = await WaitForArchiveGeneration(ghesApi, githubSourceOrg, gitDataArchiveId);
+        var gitArchiveUrl = await WaitForArchiveGeneration(_sourceGithubApi, githubSourceOrg, gitDataArchiveId);
         _log.LogInformation($"Archive (git) download url: {gitArchiveUrl}");
 
         _log.LogInformation($"Downloading archive from {gitArchiveUrl}");
-        var gitArchiveContent = await azureApi.DownloadArchive(gitArchiveUrl);
+        var gitArchiveContent = await _httpDownloadService.DownloadToBytes(gitArchiveUrl);
 
-        var metadataArchiveUrl = await WaitForArchiveGeneration(ghesApi, githubSourceOrg, metadataArchiveId);
+        var metadataArchiveUrl = await WaitForArchiveGeneration(_sourceGithubApi, githubSourceOrg, metadataArchiveId);
         _log.LogInformation($"Archive (metadata) download url: {metadataArchiveUrl}");
 
         _log.LogInformation($"Downloading archive from {metadataArchiveUrl}");
-        var metadataArchiveContent = await azureApi.DownloadArchive(metadataArchiveUrl);
+        var metadataArchiveContent = await _httpDownloadService.DownloadToBytes(metadataArchiveUrl);
 
+        return _awsApi.HasValue() ?
+            await UploadArchivesToAws(awsBucketName, gitArchiveFileName, gitArchiveContent, metadataArchiveFileName, metadataArchiveContent) :
+            await UploadArchivesToAzure(gitArchiveFileName, gitArchiveContent, metadataArchiveFileName, metadataArchiveContent);
+    }
+
+    private async Task<(string, string)> UploadArchivesToAzure(string gitArchiveFileName, byte[] gitArchiveContent, string metadataArchiveFileName, byte[] metadataArchiveContent)
+    {
         _log.LogInformation($"Uploading archive {gitArchiveFileName} to Azure Blob Storage");
-        var authenticatedGitArchiveUri = await azureApi.UploadToBlob(gitArchiveFileName, gitArchiveContent);
+        var authenticatedGitArchiveUri = await _azureApi.UploadToBlob(gitArchiveFileName, gitArchiveContent);
         _log.LogInformation($"Uploading archive {metadataArchiveFileName} to Azure Blob Storage");
-        var authenticatedMetadataArchiveUri = await azureApi.UploadToBlob(metadataArchiveFileName, metadataArchiveContent);
+        var authenticatedMetadataArchiveUri = await _azureApi.UploadToBlob(metadataArchiveFileName, metadataArchiveContent);
+
+        return (authenticatedGitArchiveUri.ToString(), authenticatedMetadataArchiveUri.ToString());
+    }
+
+    private async Task<(string, string)> UploadArchivesToAws(string bucketName, string gitArchiveFileName, byte[] gitArchiveContent, string metadataArchiveFileName, byte[] metadataArchiveContent)
+    {
+        _log.LogInformation($"Uploading archive {gitArchiveFileName} to AWS S3");
+        var authenticatedGitArchiveUri = await _awsApi.UploadToBucket(bucketName, gitArchiveContent, gitArchiveFileName);
+        _log.LogInformation($"Uploading archive {metadataArchiveFileName} to AWS S3");
+        var authenticatedMetadataArchiveUri = await _awsApi.UploadToBucket(bucketName, metadataArchiveContent, metadataArchiveFileName);
 
         return (authenticatedGitArchiveUri.ToString(), authenticatedMetadataArchiveUri.ToString());
     }
@@ -317,6 +320,21 @@ public class MigrateRepoCommandHandler
         {
             _log.LogInformation("LOCK SOURCE REPO: true");
         }
+
+        if (args.AwsBucketName.HasValue())
+        {
+            _log.LogInformation($"AWS BUCKET NAME: {args.AwsBucketName}");
+        }
+
+        if (args.AwsAccessKey.HasValue())
+        {
+            _log.LogInformation($"AWS ACCESS KEY: {args.AwsAccessKey}");
+        }
+
+        if (args.AwsSecretKey.HasValue())
+        {
+            _log.LogInformation($"AWS SECRET KEY: {args.AwsSecretKey}");
+        }
     }
 
     private void ValidateOptions(MigrateRepoCommandArgs args)
@@ -352,5 +370,65 @@ public class MigrateRepoCommandHandler
         {
             throw new OctoshiftCliException("When using archive urls, you must provide both --git-archive-url --metadata-archive-url");
         }
+
+        // GHES migration path
+        if (args.GhesApiUrl.HasValue())
+        {
+            var shouldUseAzureStorage = GetAzureStorageConnectionString(args).HasValue();
+            var shouldUseAwsS3 = args.AwsBucketName.HasValue();
+
+            if (!shouldUseAzureStorage && !shouldUseAwsS3)
+            {
+                throw new OctoshiftCliException(
+                    "Either Azure storage connection (--azure-storage-connection-string or AZURE_STORAGE_CONNECTION_STRING env. variable) or " +
+                    "AWS S3 connection (--aws-bucket-name, --aws-access-key (or AWS_ACCESS_KEY env. variable), --aws-secret-key (or AWS_SECRET_KEY env.variable)) " +
+                    "must be provided.");
+            }
+
+            if (shouldUseAzureStorage && shouldUseAwsS3)
+            {
+                throw new OctoshiftCliException(
+                    "Azure storage connection (--azure-storage-connection-string or AZURE_STORAGE_CONNECTION_STRING env. variable) and " +
+                    "AWS S3 connection (--aws-bucket-name, --aws-access-key (or AWS_ACCESS_KEY env. variable), --aws-secret-key (or AWS_SECRET_Key env.variable)) cannot be " +
+                    "specified together.");
+            }
+
+            if (shouldUseAwsS3)
+            {
+                if (!GetAwsAccessKey(args).HasValue())
+                {
+                    throw new OctoshiftCliException("Either --aws-access-key or AWS_ACCESS_KEY environment variable must be set.");
+                }
+
+                if (!GetAwsSecretKey(args).HasValue())
+                {
+                    throw new OctoshiftCliException("Either --aws-secret-key or AWS_SECRET_KEY environment variable must be set.");
+                }
+            }
+            else if (args.AwsAccessKey.HasValue() || args.AwsSecretKey.HasValue())
+            {
+                throw new OctoshiftCliException("--aws-access-key and --aws-secret-key can only be provided with --aws-bucket-name.");
+            }
+        }
+        else
+        {
+            if (args.AwsBucketName.HasValue())
+            {
+                throw new OctoshiftCliException("--ghes-api-url must be specified when --aws-bucket-name is specified.");
+            }
+
+            if (args.NoSslVerify)
+            {
+                throw new OctoshiftCliException("--ghes-api-url must be specified when --no-ssl-verify is specified.");
+            }
+        }
     }
+
+    private string GetAwsAccessKey(MigrateRepoCommandArgs args) => args.AwsAccessKey.HasValue() ? args.AwsAccessKey : _environmentVariableProvider.AwsAccessKey(false);
+
+    private string GetAwsSecretKey(MigrateRepoCommandArgs args) => args.AwsSecretKey.HasValue() ? args.AwsSecretKey : _environmentVariableProvider.AwsSecretKey(false);
+
+    private string GetAzureStorageConnectionString(MigrateRepoCommandArgs args) => args.AzureStorageConnectionString.HasValue()
+        ? args.AzureStorageConnectionString
+        : _environmentVariableProvider.AzureStorageConnectionString();
 }
