@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -62,13 +63,16 @@ public class GenerateScriptCommandHandler : ICommandHandler<GenerateScriptComman
         content.AppendLine(VersionComment);
         content.AppendLine(EXEC_FUNCTION_BLOCK);
 
-        var projects = await _bbsApi.GetProjects();
-        foreach (var (_, projectKey, projectName) in projects)
+        var projects = args.BbsProjectKey.HasValue()
+            ? new List<string>() { args.BbsProjectKey }
+            : (await _bbsApi.GetProjects()).Select(x => x.Key);
+
+        foreach (var projectKey in projects)
         {
-            _log.LogInformation($"Project: {projectName}");
+            _log.LogInformation($"Project: {projectKey}");
 
             content.AppendLine();
-            content.AppendLine($"# =========== Project: {projectName} ===========");
+            content.AppendLine($"# =========== Project: {projectKey} ===========");
 
             var repos = await _bbsApi.GetRepos(projectKey);
 
@@ -135,6 +139,11 @@ public class GenerateScriptCommandHandler : ICommandHandler<GenerateScriptComman
         if (args.BbsPassword.HasValue())
         {
             _log.LogInformation("BBS PASSWORD: ***");
+        }
+
+        if (args.BbsProjectKey.HasValue())
+        {
+            _log.LogInformation($"BBS PROJECT KEY: {args.BbsProjectKey}");
         }
 
         if (args.SshUser.HasValue())
